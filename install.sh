@@ -14,13 +14,13 @@ if [ -f "$settings" ]; then cp "$settings" "$settings.bak-statusline"; else echo
 
 if command -v jq >/dev/null 2>&1; then
   tmp=$(mktemp)
-  jq --arg c "$cmd" '.statusLine = {type: "command", command: $c, refreshInterval: 5}' "$settings" > "$tmp"
+  jq --arg c "$cmd" '.statusLine = {type: "command", command: $c, refreshInterval: 30}' "$settings" > "$tmp"
   mv "$tmp" "$settings"
 elif command -v node >/dev/null 2>&1; then
   node -e '
     const fs = require("fs"), [p, c] = process.argv.slice(1);
     const j = JSON.parse(fs.readFileSync(p, "utf8") || "{}");
-    j.statusLine = { type: "command", command: c, refreshInterval: 5 };
+    j.statusLine = { type: "command", command: c, refreshInterval: 30 };
     fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");' "$settings" "$cmd"
 else
   echo "need jq or node" >&2; exit 1

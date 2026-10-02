@@ -1,9 +1,9 @@
 # Points Claude Code's statusLine at statusline.ps1 in this folder (Windows).
-# Usage: .\install.ps1 [-ScriptArgs '-Width 100'] [-Refresh 5]
+# Usage: .\install.ps1 [-ScriptArgs '-Width 100'] [-Refresh 30]
 # Backs up settings.json to settings.json.bak-statusline first.
 param(
     [string]$ScriptArgs = '',
-    [int]$Refresh = 5
+    [int]$Refresh = 30
 )
 
 $cfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
@@ -18,7 +18,10 @@ if (Test-Path $settings) {
     $json = [pscustomobject]@{}
 }
 
-$cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script`""
+# PowerShell 7 starts about twice as fast as Windows PowerShell 5.1, and the script
+# is launched on every refresh.
+$shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
+$cmd = "$shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script`""
 if ($ScriptArgs) { $cmd += " $ScriptArgs" }
 $sl = [pscustomobject]@{ type = 'command'; command = $cmd; refreshInterval = $Refresh }
 $json | Add-Member -NotePropertyName statusLine -NotePropertyValue $sl -Force

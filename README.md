@@ -16,10 +16,25 @@ Two equivalent implementations: `statusline.ps1` (Windows PowerShell 5.1+/7) and
 
 ## Install
 
-Windows: `.\install.ps1`  
-Linux / macOS / Git Bash: `./install.sh`
+One line, pasted into a terminal (needs `git`).
 
-This sets `statusLine` in `~/.claude/settings.json` (backup: `settings.json.bak-statusline`) with `refreshInterval: 5`,
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/rwhrsbh/claude-statusline "$HOME\.claude\claude-statusline"; powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-statusline\install.ps1"
+```
+
+Linux / macOS / Git Bash:
+
+```bash
+git clone https://github.com/rwhrsbh/claude-statusline ~/.claude/claude-statusline && bash ~/.claude/claude-statusline/install.sh
+```
+
+To update later: `git -C ~/.claude/claude-statusline pull`.
+
+From an existing clone, run `.\install.ps1` (Windows) or `./install.sh` (Linux / macOS / Git Bash) in its folder.
+
+This sets `statusLine` in `~/.claude/settings.json` (backup: `settings.json.bak-statusline`) with `refreshInterval: 30`,
 so the cache timer keeps ticking while you are idle. Restart Claude Code afterwards.
 
 Manual setup:
@@ -27,10 +42,16 @@ Manual setup:
 ```json
 "statusLine": {
   "type": "command",
-  "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\path\\to\\statusline.ps1\"",
-  "refreshInterval": 5
+  "command": "pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"C:\\path\\to\\statusline.ps1\"",
+  "refreshInterval": 30
 }
 ```
+
+Keep `refreshInterval` well above the time one run takes. Every refresh starts a new shell:
+about 0.7 s with PowerShell 7 (`pwsh`), about 1.5 s with Windows PowerShell 5.1 (`powershell`).
+A 5 s interval keeps a PowerShell process running most of the time in every open session, which
+is enough to make Claude Code stutter or freeze on a busy machine. The timer shows whole minutes,
+so 30 s loses nothing. `install.ps1` picks `pwsh` when it is installed.
 
 ## Adapts to width
 
@@ -65,4 +86,7 @@ Pass them after the script path in the `command`.
 ## Notes
 
 - The cache countdown is `TTL − time since the transcript was last written`; each API request refreshes the cache, so it is an approximation.
-- `.ps1` must stay UTF-8 **with BOM**, otherwise Windows PowerShell 5.1 garbles `█ ░ │ ↻ ◷`.
+- `statusline.ps1` is kept pure ASCII (glyphs are written as code points), so it works with or without a BOM.
+- Neither script can block Claude Code: stdin is skipped when it is a terminal and abandoned if it is
+  never closed, and `statusline.ps1` kills itself after 4 s if anything stalls. It also leaves the
+  console code page untouched.

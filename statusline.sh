@@ -23,7 +23,10 @@ while [ $# -gt 0 ]; do
 done
 
 export LC_ALL=C
-input=$(cat)
+# Never block on stdin: skip it when it is the keyboard (reading would swallow the
+# user's keystrokes), and give up after 2 s if the pipe is never closed.
+input=""
+[ -t 0 ] || IFS= read -r -d '' -t 2 input
 esc=$'\033'
 
 # ---------------------------------------------------------------- parse JSON

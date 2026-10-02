@@ -1,4 +1,4 @@
-﻿# Claude Code statusline (PowerShell): caveman badge | model | ctx | cache timer | 5h | 7d
+# Claude Code statusline (PowerShell): caveman badge | model | ctx | cache timer | 5h | 7d
 #
 # Adapts to the terminal width: picks the richest layout that fits (see $Levels).
 # Options (all optional):
@@ -7,6 +7,11 @@
 #   -Ttl N         prompt-cache TTL in minutes (default: auto-detected, else 5)
 #   -Reserve N     columns kept free at the right edge (default 4)
 #   -NoCaveman     never show the caveman badge
+#
+# This runs every few seconds next to a live TUI, so it must be cheap and must never
+# block: no cmdlets that pull in extra modules (ConvertFrom-Json alone costs ~400 ms
+# in Windows PowerShell 5.1), no changes to the shared console's code page, and a
+# hard watchdog that kills the process if anything stalls.
 param(
     [string]$Width = '',
     [int]$Level = -1,
@@ -15,24 +20,70 @@ param(
     [switch]$NoCaveman
 )
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8
-$Esc = [char]27
+# Watchdog: runs on a timer thread, so it fires even if the script is stuck in a
+# blocking call (stdin that never closes, a stalled disk or network path).
+try {
+    $watchdog = [Threading.CancellationTokenSource]::new(4000)
+    [void]$watchdog.Token.Register([Action][Delegate]::CreateDelegate([Action], [Diagnostics.Process]::GetCurrentProcess(), 'Kill'))
+} catch {}
 
-$raw = [Console]::In.ReadToEnd()
-try { $j = $raw | ConvertFrom-Json } catch { $j = $null }
+$Esc = [char]27
+# Glyphs by code point, so the file stays ASCII and does not depend on a BOM.
+$GFull = [string][char]0x2588; $GEmpty = [string][char]0x2591; $GSep = [string][char]0x2502
+$GReset = [string][char]0x21BB; $GClock = [string][char]0x25F7
+$Inv = [Globalization.CultureInfo]::InvariantCulture
+
+# Stdin is read as raw bytes: setting [Console]::InputEncoding would change the code
+# page of the console shared with Claude Code. If stdin is the keyboard, reading it
+# would swallow the user's keystrokes, so it is skipped.
+$raw = ''
+if ([Console]::IsInputRedirected) {
+    try {
+        $stdin = [Console]::OpenStandardInput()
+        $ms = [IO.MemoryStream]::new()
+        $copy = $stdin.CopyToAsync($ms)
+        if (-not $copy.Wait(1500)) { exit 0 }
+        $raw = [Text.Encoding]::UTF8.GetString($ms.ToArray()).TrimStart([char]0xFEFF)
+    } catch { $raw = '' }
+}
+
+# ---------------------------------------------------------------- JSON
+# Only a handful of fields are needed, so they are pulled out with regexes instead
+# of a full parse.
+$JStr = '"(?:[^"\\]|\\.)*"'
+function Obj($s, $key) {   # text of the object stored under "key" ('' if absent)
+    $m = [regex]::Match($s, '"' + $key + '"\s*:\s*(\{(?>' + $JStr + '|[^{}"]+|(?<o>\{)|(?<-o>\}))*(?(o)(?!))\})')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+function Num($s, $key) {   # number stored under "key" ($null if absent or null)
+    $m = [regex]::Match($s, '"' + $key + '"\s*:\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)')
+    if ($m.Success) { return [double]::Parse($m.Groups[1].Value, $Inv) }
+    return $null
+}
+function Txt($s, $key) {   # string stored under "key" ('' if absent)
+    $m = [regex]::Match($s, '"' + $key + '"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    if (-not $m.Success) { return '' }
+    try { return [regex]::Unescape($m.Groups[1].Value) } catch { return $m.Groups[1].Value }
+}
+function ResetAt($s) {     # "resets_at": epoch number or ISO string
+    $t = Txt $s 'resets_at'
+    if ($t) { return $t }
+    return Num $s 'resets_at'
+}
 
 # ---------------------------------------------------------------- helpers
 function Paint($c, $t) { return "$Esc[38;5;${c}m$t$Esc[0m" }
 function PctColor($p) { if ($p -ge 80) { 196 } elseif ($p -ge 50) { 214 } else { 78 } }
 function Bar($pct, $w) {
     $n = [math]::Max(0, [math]::Min($w, [int][math]::Round($pct / 100 * $w)))
-    return ('█' * $n) + ('░' * ($w - $n))
+    return ($GFull * $n) + ($GEmpty * ($w - $n))
 }
 function Left($v) {
     if ($null -eq $v -or $v -eq '') { return '' }
     try {
-        if ($v -is [string]) { $t = [DateTimeOffset]::Parse($v) }
+        if ($v -is [string]) { $t = [DateTimeOffset]::Parse($v, $Inv) }
+        elseif ($v -gt 1e11) { $t = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$v) }
         else { $t = [DateTimeOffset]::FromUnixTimeSeconds([long]$v) }
         $d = $t - [DateTimeOffset]::Now
     } catch { return '' }
@@ -45,7 +96,7 @@ function Seg($label, $pct, $reset, $o) {
     $body = "$label "
     if ($o.bar -gt 0) { $body += (Bar $pct $o.bar) + ' ' }
     $body += "$([int][math]::Round($pct))%"
-    if ($o.reset) { $l = Left $reset; if ($l) { $body += " ↻$l" } }
+    if ($o.reset) { $l = Left $reset; if ($l) { $body += " $GReset$l" } }
     return Paint (PctColor $pct) $body
 }
 function VisLen($s) { return ($s -replace "$Esc\[[0-9;]*m", '').Length }
@@ -56,17 +107,17 @@ function Get-Ttl($path) {
     if ($Ttl -gt 0) { return $Ttl }
     if ($env:CLAUDE_CACHE_TTL_MIN -match '^\d+$') { return [int]$env:CLAUDE_CACHE_TTL_MIN }
     try {
-        $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
         try {
             $n = [int][math]::Min($fs.Length, 400000)
             if ($n -gt 0) {
                 [void]$fs.Seek(-$n, [IO.SeekOrigin]::End)
-                $buf = New-Object byte[] $n
+                $buf = [byte[]]::new($n)
                 $r = $fs.Read($buf, 0, $n)
                 $s = [Text.Encoding]::GetEncoding(28591).GetString($buf, 0, $r)
-                $m = [regex]::Matches($s, '"ephemeral_(1h|5m)_input_tokens":[1-9]')
-                if ($m.Count -gt 0) {
-                    if ($m[$m.Count - 1].Groups[1].Value -eq '1h') { return 60 } else { return 5 }
+                $m = [regex]::Match($s, '"ephemeral_(1h|5m)_input_tokens":[1-9]', 'RightToLeft')
+                if ($m.Success) {
+                    if ($m.Groups[1].Value -eq '1h') { return 60 } else { return 5 }
                 }
             }
         } finally { $fs.Dispose() }
@@ -75,35 +126,37 @@ function Get-Ttl($path) {
 }
 
 # ---------------------------------------------------------------- data
-$modelName = ''; $ctx = $null; $five = $null; $seven = $null
+$modelName = Txt (Obj $raw 'model') 'display_name'
+$ctx = Num (Obj $raw 'context_window') 'used_percentage'
+$fiveObj = Obj $raw 'five_hour'; $five = Num $fiveObj 'used_percentage'; $fiveReset = ResetAt $fiveObj
+$sevenObj = Obj $raw 'seven_day'; $seven = Num $sevenObj 'used_percentage'; $sevenReset = ResetAt $sevenObj
+
 $cacheTxt = ''; $cacheCol = 78
-if ($j) {
-    if ($j.model.display_name) { $modelName = [string]$j.model.display_name }
-    $ctx = $j.context_window.used_percentage
-    if ($j.rate_limits) { $five = $j.rate_limits.five_hour; $seven = $j.rate_limits.seven_day }
-    $tp = $j.transcript_path
-    if ($tp -and (Test-Path -LiteralPath $tp)) {
-        $ttl = Get-Ttl $tp
-        $age = (Get-Date) - (Get-Item -LiteralPath $tp).LastWriteTime
-        $left = $ttl - $age.TotalMinutes
-        if ($left -le 0) { $cacheCol = 240; $cacheTxt = 'cold' }
-        else {
-            $cacheCol = if ($left -le 1) { 196 } elseif ($left -le $ttl * 0.2) { 214 } else { 78 }
-            $cacheTxt = ('{0}m' -f [int][math]::Ceiling($left))
+$tp = Txt $raw 'transcript_path'
+if ($tp) {
+    try {
+        if ([IO.File]::Exists($tp)) {
+            $ttlMin = Get-Ttl $tp
+            $age = [DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($tp)
+            $left = $ttlMin - $age.TotalMinutes
+            if ($left -le 0) { $cacheCol = 240; $cacheTxt = 'cold' }
+            else {
+                $cacheCol = if ($left -le 1) { 196 } elseif ($left -le $ttlMin * 0.2) { 214 } else { 78 }
+                $cacheTxt = ('{0}m' -f [int][math]::Ceiling($left))
+            }
         }
-    }
+    } catch {}
 }
 
 # Caveman badge: shown only when the caveman plugin is installed and active
 # (its flag file exists). Skipped silently otherwise.
 $cave = ''
 if (-not $NoCaveman) {
-    $cdir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
-    $flag = Join-Path $cdir '.caveman-active'
     try {
-        $it = Get-Item -LiteralPath $flag -Force -ErrorAction Stop
-        if (-not ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $it.Length -le 64) {
-            $m = ([string](Get-Content -LiteralPath $flag -TotalCount 1)).Trim().ToLowerInvariant() -replace '[^a-z0-9-]', ''
+        $cdir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { [IO.Path]::Combine($HOME, '.claude') }
+        $fi = [IO.FileInfo]::new([IO.Path]::Combine($cdir, '.caveman-active'))
+        if ($fi.Exists -and -not ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $fi.Length -le 64) {
+            $m = ([IO.File]::ReadAllText($fi.FullName) -split "`n")[0].Trim().ToLowerInvariant() -replace '[^a-z0-9-]', ''
             if ($m -match '^(lite|full|ultra|wenyan(-lite|-full|-ultra)?|commit|review|compress)$') { $cave = $m }
         }
     } catch {}
@@ -118,7 +171,7 @@ function ShortModel($n) {
 }
 
 # ---------------------------------------------------------------- layouts
-# bar = bar width (0 = percent only), reset = show "↻time", model/cave = full|short|none, d7 = show 7d
+# bar = bar width (0 = percent only), reset = show reset time, model/cave = full|short|none, d7 = show 7d
 $Levels = @(
     @{ bar = 10; reset = $true;  model = 'full';  cave = 'full';  d7 = $true  },
     @{ bar = 10; reset = $false; model = 'full';  cave = 'full';  d7 = $true  },
@@ -146,10 +199,10 @@ function Render($o) {
         $p += Paint 110 $mn
     }
     if ($null -ne $ctx) { $p += Seg 'ctx' $ctx $null $o }
-    if ($cacheTxt) { $p += Paint $cacheCol "◷ $cacheTxt" }
-    if ($five -and $null -ne $five.used_percentage) { $p += Seg '5h' $five.used_percentage $five.resets_at $o }
-    if ($o.d7 -and $seven -and $null -ne $seven.used_percentage) { $p += Seg '7d' $seven.used_percentage $seven.resets_at $o }
-    return ($p -join ' │ ')
+    if ($cacheTxt) { $p += Paint $cacheCol "$GClock $cacheTxt" }
+    if ($null -ne $five) { $p += Seg '5h' $five $fiveReset $o }
+    if ($o.d7 -and $null -ne $seven) { $p += Seg '7d' $seven $sevenReset $o }
+    return ($p -join " $GSep ")
 }
 
 # ---------------------------------------------------------------- fit
@@ -179,4 +232,15 @@ if ($Level -ge 0) {
         while ($lv -lt $last -and (VisLen $out) -gt $avail) { $lv++; $out = Render $Levels[$lv] }
     }
 }
-[Console]::Write($out)
+
+# Written as raw UTF-8 bytes when piped (the normal case), again to leave the shared
+# console's code page alone. Only a manual run in a terminal goes through the console.
+if ([Console]::IsOutputRedirected) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($out)
+    $stdout = [Console]::OpenStandardOutput()
+    $stdout.Write($bytes, 0, $bytes.Length)
+    $stdout.Flush()
+} else {
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    [Console]::Write($out)
+}

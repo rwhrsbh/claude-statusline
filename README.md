@@ -16,28 +16,72 @@ Two equivalent implementations: `statusline.ps1` (Windows PowerShell 5.1+/7) and
 
 ## Install
 
-One line, pasted into a terminal (needs `git`).
+One line, pasted into a terminal. Nothing to clone.
 
 Windows (PowerShell):
 
 ```powershell
-git clone https://github.com/rwhrsbh/claude-statusline "$HOME\.claude\claude-statusline"; powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-statusline\install.ps1"
+irm https://raw.githubusercontent.com/rwhrsbh/claude-statusline/main/install.ps1 | iex
 ```
 
-Linux / macOS / Git Bash:
+Linux / macOS:
 
 ```bash
-git clone https://github.com/rwhrsbh/claude-statusline ~/.claude/claude-statusline && bash ~/.claude/claude-statusline/install.sh
+curl -fsSL https://raw.githubusercontent.com/rwhrsbh/claude-statusline/main/install.sh | bash
 ```
 
-To update later: `git -C ~/.claude/claude-statusline pull`.
+Then restart Claude Code. To update, run the same line again: it replaces the script and leaves your
+`statusLine` entry as it is.
 
-From an existing clone, run `.\install.ps1` (Windows) or `./install.sh` (Linux / macOS / Git Bash) in its folder.
+What the installer does:
 
-This sets `statusLine` in `~/.claude/settings.json` (backup: `settings.json.bak-statusline`) with `refreshInterval: 30`,
-so the cache timer keeps ticking while you are idle. Restart Claude Code afterwards.
+- Downloads one file, `statusline.ps1` (Windows) or `statusline.sh` (Linux / macOS), into `~/.claude`
+  (or `$CLAUDE_CONFIG_DIR`).
+- Sets `statusLine` in `settings.json` to run it, with `refreshInterval: 30` so the cache timer keeps
+  ticking while you are idle. Only that entry is changed.
+- Keeps whatever it replaces, so the uninstaller can put it back:
+  - `settings.json.bak-statusline`: a full copy of `settings.json` from before the install
+  - `statusline.prev.json`: the `statusLine` you had before
+  - `statusline.ps1.bak-statusline` / `statusline.sh.bak-statusline`: a different script of the same
+    name that was already there
+- On Windows the PowerShell version is always installed, even if you run the `curl … | bash` line from Git Bash.
+- On Linux / macOS the script needs `jq` or `node`. If neither is installed, the installer says so and
+  offers to install `jq` with your package manager (`apt-get`, `dnf`, `yum`, `pacman`, `zypper`, `apk`
+  or `brew`). If you decline, nothing is changed. When there is no terminal to ask on (CI, a Docker build),
+  it installs `jq` without asking, and stops without changing anything if that needs a `sudo` password.
 
-Manual setup:
+## Uninstall
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/rwhrsbh/claude-statusline/main/uninstall.ps1 | iex
+```
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rwhrsbh/claude-statusline/main/uninstall.sh | bash
+```
+
+- If `statusLine` is this statusline, it is removed and the one you had before the install is restored.
+- If `statusLine` is something else, the uninstaller tells you and asks before removing it. With no
+  terminal to ask on, it leaves it alone.
+- The statusline script and `statusline.prev.json` are deleted; a script that the installer moved aside is
+  put back. `settings.json.bak-statusline` is kept.
+
+## From a clone
+
+```bash
+git clone https://github.com/rwhrsbh/claude-statusline
+```
+
+Running `.\install.ps1` or `./install.sh` from the clone installs the copy in that folder instead of
+downloading it, which is the way to try local changes.
+
+## Manual setup
+
+Put `statusline.ps1` or `statusline.sh` anywhere and add this to `settings.json`:
 
 ```json
 "statusLine": {
@@ -51,7 +95,7 @@ Keep `refreshInterval` well above the time one run takes. Every refresh starts a
 about 0.7 s with PowerShell 7 (`pwsh`), about 1.5 s with Windows PowerShell 5.1 (`powershell`).
 A 5 s interval keeps a PowerShell process running most of the time in every open session, which
 is enough to make Claude Code stutter or freeze on a busy machine. The timer shows whole minutes,
-so 30 s loses nothing. `install.ps1` picks `pwsh` when it is installed.
+so 30 s loses nothing. The installer picks `pwsh` when it is installed.
 
 ## Adapts to width
 
@@ -71,7 +115,8 @@ The line is fitted to the terminal width (`$COLUMNS`). When it does not fit, the
 
 ## Options
 
-Pass them after the script path in the `command`.
+The installer sets none: the line already fits itself to the terminal width. To use one, add it after the
+script path in the `command` in `settings.json`. Updating keeps your edited `command`.
 
 | PowerShell | bash | |
 |------------|------|-|
